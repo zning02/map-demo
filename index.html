@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>低空点线面交互 Demo</title>
+    <link rel="stylesheet" href="./css/main.css">
+    <script type="text/javascript" src="https://api.map.baidu.com/api?v=3.0&ak=SDcEMgLPFmyhGgiH0UyRSHzL5cJpQO7i"></script>
+    <script type="text/javascript" src="https://api.map.baidu.com/library/InfoBox/1.2/src/InfoBox_min.js"></script>
+</head>
+
+<body>
+    <div id="app">
+        <div id="map"></div>
+
+        <header class="topbar panel">
+            <div class="brand">
+                <div class="title">低空点线面交互 Demo</div>
+                <div class="subtitle">点位详情 · 实时航迹 · 轨迹回放 · 空域表达</div>
+            </div>
+            <div class="stats" id="stats"></div>
+            <div class="layer-switches">
+                <button class="chip active" data-layer-toggle="drones">无人机</button>
+                <button class="chip active" data-layer-toggle="devices">监视设备</button>
+                <button class="chip active" data-layer-toggle="liveTrails">实时轨迹</button>
+                <button class="chip" data-layer-toggle="blocks">空域</button>
+                <button class="chip" data-layer-toggle="grids">空域网格</button>
+                <button class="chip" data-layer-toggle="labels">标签</button>
+                <!-- <button class="chip" id="fitAllBtn">回到全局</button> -->
+            </div>
+        </header>
+
+        <aside class="toolbar panel">
+            <button class="tool-btn active" data-group-toggle="point">点</button>
+            <button class="tool-btn active" data-group-toggle="line">线</button>
+            <button class="tool-btn" data-group-toggle="area">面</button>
+        </aside>
+
+        <section class="detail-card panel is-empty" id="detailCard">
+            <div class="detail-header">
+                <div>
+                    <div class="detail-kicker" id="detailKicker">请选择地图对象</div>
+                    <div class="detail-title" id="detailTitle">点线面交互展示</div>
+                </div>
+                <button class="icon-btn" id="detailCloseBtn" aria-label="关闭详情">×</button>
+            </div>
+            <div class="detail-desc" id="detailDesc">点击无人机、监视设备、空域或网格，可查看对象信息；右击无人机点位可打开底部轨迹回放。</div>
+            <div class="detail-grid" id="detailGrid"></div>
+
+            <section class="detail-playback hidden" id="playbackPanel">
+                <div class="playback-head">
+                    <div>
+                        <div class="playback-kicker">轨迹回放</div>
+                        <div class="playback-title" id="playbackTitle">选中无人机后可查看历史轨迹</div>
+                    </div>
+                </div>
+                <div class="playback-entry" id="playbackEntry">
+                    <div class="playback-summary" id="playbackSummary">选中无人机后，可在此处打开轨迹回放。</div>
+                    <button class="action-btn playback-open-btn" id="playbackOpenBtn">打开回放</button>
+                </div>
+                <div class="playback-controls hidden" id="playbackControls">
+                    <div class="playback-actions">
+                        <button class="action-btn" id="playbackToggleBtn">播放</button>
+                        <button class="action-btn muted" id="playbackResetBtn">重置</button>
+                        <select class="speed-select" id="playbackSpeedSelect">
+                            <option value="1">1x</option>
+                            <option value="2">2x</option>
+                            <option value="4">4x</option>
+                        </select>
+                        <button class="action-btn muted playback-return-btn" id="playbackReturnBtn">返回实时</button>
+                    </div>
+                    <div class="playback-summary" id="playbackPlaybackSummary">速度 -- m/s · 高度 -- m · 时间 --</div>
+                </div>
+                <div class="slider-wrap hidden" id="playbackSliderWrap">
+                    <input type="range" id="playbackSlider" min="0" max="100" value="0">
+                </div>
+                <div class="playback-meta hidden" id="playbackMeta">
+                    <span id="playbackStartTime">--:--:--</span>
+                    <span id="playbackCurrentTime">--:--:--</span>
+                    <span id="playbackProgress">0%</span>
+                </div>
+            </section>
+        </section>
+
+        <section class="map-popup hidden" id="mapPopup">
+            <div class="map-popup-card">
+                <button class="map-popup-close" id="mapPopupCloseBtn" aria-label="关闭弹窗">×</button>
+                <div class="map-popup-content" id="mapPopupContent"></div>
+            </div>
+            <div class="map-popup-arrow"></div>
+        </section>
+
+        <!-- <div class="map-tip panel">左侧点线面支持多选控制图层显示；左击查看详情，右击无人机点位打开轨迹回放。</div> -->
+    </div>
+
+    <script type="module" src="./js/main.js"></script>
+</body>
+
+</html>
