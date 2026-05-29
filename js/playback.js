@@ -104,8 +104,8 @@ export function createPlaybackController(app, options = {}) {
         pause();
         setPlayingStatus(true);
         state.timer = setInterval(function () {
-            const drone = app.getDroneById(state.droneId);
-            if (state.index >= drone.route.length - 1) {
+            const replayFrameCount = app.getReplayFrameCount(state.droneId);
+            if (state.index >= replayFrameCount - 1) {
                 finish();
                 return;
             }
@@ -151,8 +151,8 @@ export function createPlaybackController(app, options = {}) {
         state.speed = Number(speedSelect.value);
         showPanel();
         setExpanded(true);
-        summaryEl.innerText = "历史轨迹已展开，实时点位、实时轨迹和地图弹窗已隐藏，可在此处回放或返回实时。";
-        sliderEl.max = drone.route.length - 1;
+        summaryEl.innerText = "历史轨迹已展开，正在回放该无人机已记录的实时巡游轨迹，可在此处回放或返回实时。";
+        sliderEl.max = Math.max(0, app.getReplayFrameCount(drone.id) - 1);
         app.prepareReplay(drone.id);
         app.selectDrone(drone.id, false, "history");
         renderFrame();

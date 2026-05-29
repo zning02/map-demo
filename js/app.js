@@ -16,6 +16,8 @@ export function createMapDemoApp(options = {}) {
         replayGuide: null,
         replayTrail: null,
         replayMarker: null,
+        replayFrames: [],
+        replayPoints: [],
         replayDroneId: "",
         replayIndex: 0,
         popupPoint: null,
@@ -51,6 +53,10 @@ export function createMapDemoApp(options = {}) {
         return "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(svg);
     }
 
+    function pad(value) {
+        return value < 10 ? "0" + value : String(value);
+    }
+
     function formatCoord(value) {
         return Number(value).toFixed(5);
     }
@@ -67,6 +73,180 @@ export function createMapDemoApp(options = {}) {
             lat += list[i].lat;
         }
         return new BMap.Point(lng / list.length, lat / list.length);
+    }
+
+    function getDistanceSquared(pointA, pointB) {
+        const deltaLng = pointA.lng - pointB.lng;
+        const deltaLat = pointA.lat - pointB.lat;
+        return deltaLng * deltaLng + deltaLat * deltaLat;
+    }
+
+    function isPointInsidePolygon(point, polygon) {
+        let inside = false;
+        for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+            const current = polygon[i];
+            const previous = polygon[j];
+            const intersect = ((current.lat > point.lat) !== (previous.lat > point.lat)) &&
+                (point.lng < ((previous.lng - current.lng) * (point.lat - current.lat)) / (previous.lat - current.lat) + current.lng);
+            if (intersect) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
+    function getBounds(points) {
+        const bounds = {
+            minLng: points[0].lng,
+            maxLng: points[0].lng,
+            minLat: points[0].lat,
+            maxLat: points[0].lat
+        };
+        for (let i = 1; i < points.length; i += 1) {
+            bounds.minLng = Math.min(bounds.minLng, points[i].lng);
+            bounds.maxLng = Math.max(bounds.maxLng, points[i].lng);
+            bounds.minLat = Math.min(bounds.minLat, points[i].lat);
+            bounds.maxLat = Math.max(bounds.maxLat, points[i].lat);
+        }
+        return bounds;
+    }
+
+    function resolveDroneAirspace(drone) {
+        const firstPoint = drone.route[0];
+        let nearestAirspace = data.airspaceBlocks[0];
+        let nearestDistance = Number.MAX_VALUE;
+        for (let i = 0; i < data.airspaceBlocks.length; i += 1) {
+            const airspace = data.airspaceBlocks[i];
+            if (isPointInsidePolygon(firstPoint, airspace.polygon)) {
+                return airspace;
+            }
+            const centroid = getCentroid(airspace.polygon);
+            const distance = getDistanceSquared(firstPoint, centroid);
+            if (distance < nearestDistance) {
+                nearestDistance = distance;
+                nearestAirspace = airspace;
+            }
+        }
+        return nearestAirspace;
+    }
+
+    function nextSeedValue(drone) {
+        drone.livePatrolSeed = (drone.livePatrolSeed * 1664525 + 1013904223) % 4294967296;
+        return drone.livePatrolSeed / 4294967296;
+    }
+
+    function createRandomPointInAirspace(drone) {
+        const bounds = drone.liveAirspaceBounds;
+        for (let attempt = 0; attempt < 48; attempt += 1) {
+            const lng = bounds.minLng + nextSeedValue(drone) * (bounds.maxLng - bounds.minLng);
+            const lat = bounds.minLat + nextSeedValue(drone) * (bounds.maxLat - bounds.minLat);
+            const point = { lng, lat };
+            if (isPointInsidePolygon(point, drone.liveAirspace.polygon)) {
+                return new BMap.Point(Number(lng.toFixed(6)), Number(lat.toFixed(6)));
+            }
+        }
+        return getCentroid(drone.liveAirspace.polygon);
+    }
+
+    function isFarFromRecentTargets(point, history) {
+        for (let i = 0; i < history.length; i += 1) {
+            if (getDistanceSquared(point, history[i]) < 0.0000016) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function pickNextPatrolPoint(drone) {
+        let bestPoint = null;
+        let bestDistance = 0;
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+            const candidate = createRandomPointInAirspace(drone);
+            const distance = getDistanceSquared(drone.liveCurrentPoint, candidate);
+            if (distance > bestDistance && isFarFromRecentTargets(candidate, drone.liveRecentTargets)) {
+                bestPoint = candidate;
+                bestDistance = distance;
+            }
+        }
+        const nextPoint = bestPoint || createRandomPointInAirspace(drone);
+        drone.liveRecentTargets.push(nextPoint);
+        if (drone.liveRecentTargets.length > 6) {
+            drone.liveRecentTargets.shift();
+        }
+        return nextPoint;
+    }
+
+    function createBentMidPoint(drone, startPoint, endPoint, ratio, offsetFactor) {
+        const deltaLng = endPoint.lng - startPoint.lng;
+        const deltaLat = endPoint.lat - startPoint.lat;
+        const directLength = Math.sqrt(getDistanceSquared(startPoint, endPoint)) || 0.0001;
+        const baseLng = startPoint.lng + deltaLng * ratio;
+        const baseLat = startPoint.lat + deltaLat * ratio;
+        const normalLng = -deltaLat / directLength;
+        const normalLat = deltaLng / directLength;
+        const maxOffset = Math.min(Math.max(directLength * offsetFactor, 0.00025), 0.0011);
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+            const direction = nextSeedValue(drone) > 0.5 ? 1 : -1;
+            const scale = 0.45 + nextSeedValue(drone) * 0.9;
+            const lng = baseLng + normalLng * maxOffset * scale * direction;
+            const lat = baseLat + normalLat * maxOffset * scale * direction;
+            const point = { lng, lat };
+            if (isPointInsidePolygon(point, drone.liveAirspace.polygon)) {
+                return new BMap.Point(Number(lng.toFixed(6)), Number(lat.toFixed(6)));
+            }
+        }
+        return createRandomPointInAirspace(drone);
+    }
+
+    function appendInterpolatedSegment(segmentPoints, startPoint, endPoint) {
+        const deltaLng = endPoint.lng - startPoint.lng;
+        const deltaLat = endPoint.lat - startPoint.lat;
+        const steps = Math.max(2, Math.min(6, Math.ceil(Math.max(Math.abs(deltaLng), Math.abs(deltaLat)) / 0.00028)));
+        for (let step = 1; step <= steps; step += 1) {
+            const ratio = step / steps;
+            segmentPoints.push(new BMap.Point(
+                Number((startPoint.lng + deltaLng * ratio).toFixed(6)),
+                Number((startPoint.lat + deltaLat * ratio).toFixed(6))
+            ));
+        }
+    }
+
+    function buildLiveSegmentPoints(drone, startPoint, endPoint) {
+        const bendPointA = createBentMidPoint(drone, startPoint, endPoint, 0.32 + nextSeedValue(drone) * 0.08, 0.42);
+        const bendPointB = createBentMidPoint(drone, startPoint, endPoint, 0.64 + nextSeedValue(drone) * 0.1, 0.36);
+        const controlPoints = [startPoint, bendPointA, bendPointB, endPoint];
+        const segmentPoints = [];
+        for (let i = 0; i < controlPoints.length - 1; i += 1) {
+            appendInterpolatedSegment(segmentPoints, controlPoints[i], controlPoints[i + 1]);
+        }
+        return segmentPoints;
+    }
+
+    function createLiveFrame(drone, point, tickCount) {
+        const totalSeconds = (drone.liveStartSeconds || 0) + tickCount * Math.max(1, Math.round(config.liveTickMs / 1000));
+        const hour = Math.floor((totalSeconds % 86400) / 3600);
+        const minute = Math.floor((totalSeconds % 3600) / 60);
+        const second = totalSeconds % 60;
+        const speed = Number((drone.liveBaseSpeed + (((tickCount + drone.liveVariantOffset) % 7) - 3) * 0.45).toFixed(1));
+        const altitude = Math.round(drone.liveBaseAltitude + (((tickCount + drone.liveVariantOffset) % 9) - 4) * 3);
+        return {
+            lng: point.lng,
+            lat: point.lat,
+            speed,
+            altitude,
+            time: pad(hour) + ":" + pad(minute) + ":" + pad(second)
+        };
+    }
+
+    function advanceDroneLivePoint(drone) {
+        if (!drone.liveSegmentPoints.length || drone.liveSegmentIndex >= drone.liveSegmentPoints.length) {
+            const nextTarget = pickNextPatrolPoint(drone);
+            drone.liveSegmentPoints = buildLiveSegmentPoints(drone, drone.liveCurrentPoint, nextTarget);
+            drone.liveSegmentIndex = 0;
+        }
+        const point = drone.liveSegmentPoints[drone.liveSegmentIndex];
+        drone.liveSegmentIndex += 1;
+        return point;
     }
 
     function createDroneIcon(color, emphasized) {
@@ -154,8 +334,22 @@ export function createMapDemoApp(options = {}) {
                 drone.routePoints.push(toPoint(drone.route[j]));
             }
             drone.currentIndex = Math.min((i + 2) * 3, drone.routePoints.length - 1);
-            drone.liveDirection = drone.currentIndex >= drone.routePoints.length - 1 ? -1 : 1;
-            drone.liveTrailPoints = drone.routePoints.slice(0, drone.currentIndex + 1);
+            drone.liveAirspace = resolveDroneAirspace(drone);
+            drone.liveAirspaceBounds = getBounds(drone.liveAirspace.polygon);
+            drone.livePatrolSeed = (i + 1) * 131;
+            drone.liveBaseSpeed = drone.route.length ? drone.route[0].speed : 10;
+            drone.liveBaseAltitude = drone.route.length ? drone.route[0].altitude : 90;
+            drone.liveVariantOffset = i * 5;
+            drone.liveCurrentPoint = createRandomPointInAirspace(drone);
+            drone.liveRecentTargets = [drone.liveCurrentPoint];
+            drone.liveSegmentPoints = [];
+            drone.liveSegmentIndex = 0;
+            drone.liveTickCount = 0;
+            drone.liveStartSeconds = (i * 7 + 14) * 60 * 60 + (18 + i * 4) * 60;
+            drone.liveFrame = createLiveFrame(drone, drone.liveCurrentPoint, drone.liveTickCount);
+            drone.liveHistoryFrames = [Object.assign({}, drone.liveFrame)];
+            drone.liveHistoryPoints = [new BMap.Point(drone.liveCurrentPoint.lng, drone.liveCurrentPoint.lat)];
+            drone.liveTrailPoints = [drone.liveCurrentPoint];
             drone.liveTrail = new BMap.Polyline(drone.liveTrailPoints, {
                 strokeColor: "#4fa7ff",
                 strokeWeight: 4,
@@ -165,7 +359,7 @@ export function createMapDemoApp(options = {}) {
             registerOverlay("liveTrails", drone.liveTrail);
             drone.defaultIcon = createDroneIcon(drone.color, false);
             drone.activeIcon = createDroneIcon(drone.color, true);
-            drone.marker = new BMap.Marker(drone.routePoints[drone.currentIndex], {
+            drone.marker = new BMap.Marker(drone.liveCurrentPoint, {
                 icon: drone.defaultIcon,
                 title: drone.name
             });
@@ -243,20 +437,6 @@ export function createMapDemoApp(options = {}) {
             grid.overlay.addEventListener("mouseover", createAreaHover(grid.overlay, Math.min(fillOpacity + 0.08, 0.26)));
             grid.overlay.addEventListener("mouseout", createAreaHover(grid.overlay, fillOpacity));
             registerOverlay("grids", grid.overlay);
-            grid.label = new BMap.Label(grid.id, {
-                position: getCentroid(grid.polygon),
-                offset: new BMap.Size(-18, -8)
-            });
-            grid.label.setStyle({
-                color: "#e2efff",
-                background: "rgba(6,14,25,0.62)",
-                border: "1px solid rgba(255,255,255,0.08)",
-                borderRadius: "8px",
-                padding: "4px 6px",
-                fontSize: "11px",
-                lineHeight: "1"
-            });
-            registerOverlay("labels", grid.label);
         }
     }
 
@@ -420,7 +600,7 @@ export function createMapDemoApp(options = {}) {
         document.getElementById("detailCard").classList.add("is-empty");
         document.getElementById("detailKicker").innerText = "请选择地图对象";
         document.getElementById("detailTitle").innerText = "点线面交互展示";
-        document.getElementById("detailDesc").innerText = "点击无人机查看实时态势，历史轨迹播放。";
+        document.getElementById("detailDesc").innerText = "点击查看详情，历史轨迹在详情里，顶部筛选对象，左侧切换点线面。";
         document.getElementById("detailGrid").innerHTML = "";
         syncDroneSelectionVisual();
         notifySelectionChange();
@@ -454,8 +634,26 @@ export function createMapDemoApp(options = {}) {
         return data.airspaceGrids[0];
     }
 
+    function getReplayFrames(drone) {
+        if (state.replayDroneId === drone.id && state.replayFrames.length) {
+            return state.replayFrames;
+        }
+        return drone.liveHistoryFrames && drone.liveHistoryFrames.length ? drone.liveHistoryFrames : drone.route;
+    }
+
+    function getReplayPoints(drone) {
+        if (state.replayDroneId === drone.id && state.replayPoints.length) {
+            return state.replayPoints;
+        }
+        return drone.liveHistoryPoints && drone.liveHistoryPoints.length ? drone.liveHistoryPoints : drone.routePoints;
+    }
+
     function getDroneFrame(drone, index) {
-        return drone.route[index == null ? drone.currentIndex : index];
+        if (index == null) {
+            return drone.liveFrame || drone.route[drone.currentIndex];
+        }
+        const replayFrames = getReplayFrames(drone);
+        return replayFrames[Math.max(0, Math.min(index, replayFrames.length - 1))];
     }
 
     function isReplayActiveForDrone(droneId) {
@@ -497,11 +695,11 @@ export function createMapDemoApp(options = {}) {
     }
 
     function setDroneDetail(drone, frameIndex, mode, openWindow) {
-        const frame = getDroneFrame(drone, frameIndex);
         const isHistoryMode = mode === "history";
+        const frame = getDroneFrame(drone, isHistoryMode ? frameIndex : null);
         const desc = isHistoryMode
             ? "历史轨迹模式：时间轴控制历史回放点。"
-            : "实时轨迹模式：展示当前速度、高度与电量。";
+            : "实时轨迹模式：在所属空域内自由巡游，展示当前速度、高度与电量。";
         const rows = isHistoryMode
             ? [
                 { label: "任务", value: drone.mission },
@@ -521,21 +719,22 @@ export function createMapDemoApp(options = {}) {
             ];
         setDetailCard(drone.name, drone.id + " · 无人机点位", desc, rows);
         if (openWindow) {
-            const point = drone.routePoints[frameIndex];
+            const replayPoints = isHistoryMode ? getReplayPoints(drone) : null;
+            const point = isHistoryMode ? replayPoints[Math.max(0, Math.min(frameIndex, replayPoints.length - 1))] : drone.liveCurrentPoint;
             openMapPopup(point, "" +
                 "<h4>" + drone.name + "</h4>" +
                 "<p>编号：" + drone.id + " · 机型：" + drone.model + "</p>" +
                 "<p>任务：" + drone.mission + "</p>" +
                 (isHistoryMode
                     ? "<p>模式：历史回放 · 时间：" + frame.time + "</p><p>提示：拖动底部时间轴查看历史轨迹</p>"
-                    : "<p>速度：" + frame.speed + "m/s · 高度：" + frame.altitude + "m · 电量：" + drone.battery + "%</p>"));
+                    : "<p>模式：实时巡游 · 速度：" + frame.speed + "m/s · 高度：" + frame.altitude + "m · 电量：" + drone.battery + "%</p>"));
         }
     }
 
     function selectDrone(id, openWindow, mode) {
         const drone = getDroneById(id);
         const detailMode = mode || (isReplayActiveForDrone(id) ? "history" : "live");
-        const frameIndex = detailMode === "history" ? state.replayIndex : drone.currentIndex;
+        const frameIndex = detailMode === "history" ? state.replayIndex : null;
         state.selectedType = "drone";
         state.selectedId = id;
         syncDroneSelectionVisual();
@@ -642,6 +841,10 @@ export function createMapDemoApp(options = {}) {
         if (group === "liveTrails") {
             syncLiveTrailsVisibility();
         }
+        if ((group === "blocks" || group === "grids") && !state.layerVisibility.blocks && !state.layerVisibility.grids && state.layerVisibility.labels) {
+            setLayerVisible("labels", false);
+            updateLayerChipState("labels", false);
+        }
     }
 
     function updateGroupButtonState() {
@@ -672,6 +875,10 @@ export function createMapDemoApp(options = {}) {
         for (let i = 0; i < layers.length; i += 1) {
             setLayerVisible(layers[i], visible);
             updateLayerChipState(layers[i], visible);
+        }
+        if (groupName === "area" && !visible && state.layerVisibility.labels) {
+            setLayerVisible("labels", false);
+            updateLayerChipState("labels", false);
         }
         updateGroupButtonState();
     }
@@ -737,20 +944,34 @@ export function createMapDemoApp(options = {}) {
         updateGroupButtonState();
     }
 
+    function shouldPauseLiveMotion() {
+        return !state.layerVisibility.drones;
+    }
+
+    function shouldPauseLiveTrailDrawing() {
+        return !state.layerVisibility.liveTrails;
+    }
+
     function tickLive() {
+        if (shouldPauseLiveMotion()) {
+            syncLiveTrailsVisibility();
+            renderStats();
+            return;
+        }
+        const pauseTrailDrawing = shouldPauseLiveTrailDrawing();
         for (let i = 0; i < data.drones.length; i += 1) {
             const drone = data.drones[i];
-            if (drone.routePoints.length > 1) {
-                if (drone.currentIndex >= drone.routePoints.length - 1) {
-                    drone.liveDirection = -1;
-                } else if (drone.currentIndex <= 0) {
-                    drone.liveDirection = 1;
-                }
-                drone.currentIndex += drone.liveDirection;
+            const nextPoint = advanceDroneLivePoint(drone);
+            drone.liveCurrentPoint = nextPoint;
+            drone.liveTickCount += 1;
+            drone.liveFrame = createLiveFrame(drone, nextPoint, drone.liveTickCount);
+            drone.marker.setPosition(nextPoint);
+            if (!pauseTrailDrawing) {
+                drone.liveTrailPoints.push(nextPoint);
+                drone.liveHistoryPoints.push(new BMap.Point(nextPoint.lng, nextPoint.lat));
+                drone.liveHistoryFrames.push(Object.assign({}, drone.liveFrame));
+                drone.liveTrail.setPath(drone.liveTrailPoints);
             }
-            drone.marker.setPosition(drone.routePoints[drone.currentIndex]);
-            drone.liveTrailPoints.push(drone.routePoints[drone.currentIndex]);
-            drone.liveTrail.setPath(drone.liveTrailPoints);
             if (drone.status !== "待命") {
                 drone.battery = Math.max(36, drone.battery - 1);
             }
@@ -763,7 +984,7 @@ export function createMapDemoApp(options = {}) {
                 selectDrone(state.selectedId, false, "live");
                 if (state.popupWindow) {
                     const selectedDrone = getDroneById(state.selectedId);
-                    state.popupPoint = selectedDrone.routePoints[selectedDrone.currentIndex];
+                    state.popupPoint = selectedDrone.liveCurrentPoint;
                     positionMapPopup();
                 }
             }
@@ -818,24 +1039,37 @@ export function createMapDemoApp(options = {}) {
             map.removeOverlay(state.replayMarker);
             state.replayMarker = null;
         }
+        state.replayFrames = [];
+        state.replayPoints = [];
+    }
+
+    function getReplayFrameCount(droneId) {
+        const drone = getDroneById(droneId);
+        return getReplayFrames(drone).length;
     }
 
     function prepareReplay(droneId) {
         const drone = getDroneById(droneId);
         clearReplayVisual();
-        state.replayGuide = new BMap.Polyline(drone.routePoints, {
+        state.replayFrames = (drone.liveHistoryFrames && drone.liveHistoryFrames.length ? drone.liveHistoryFrames : drone.route).map(function (frame) {
+            return Object.assign({}, frame);
+        });
+        state.replayPoints = (drone.liveHistoryPoints && drone.liveHistoryPoints.length ? drone.liveHistoryPoints : drone.routePoints).map(function (point) {
+            return new BMap.Point(point.lng, point.lat);
+        });
+        state.replayGuide = new BMap.Polyline(state.replayPoints, {
             strokeColor: "#f8fbff",
             strokeWeight: 4,
             strokeOpacity: 0.3,
             strokeStyle: "dashed"
         });
-        state.replayTrail = new BMap.Polyline([drone.routePoints[0]], {
+        state.replayTrail = new BMap.Polyline([state.replayPoints[0]], {
             strokeColor: "#ffb84d",
             strokeWeight: 7,
             strokeOpacity: 0.96,
             strokeStyle: "solid"
         });
-        state.replayMarker = new BMap.Marker(drone.routePoints[0], {
+        state.replayMarker = new BMap.Marker(state.replayPoints[0], {
             icon: createReplayIcon(),
             title: drone.name + " 历史回放点"
         });
@@ -843,19 +1077,26 @@ export function createMapDemoApp(options = {}) {
         map.addOverlay(state.replayTrail);
         map.addOverlay(state.replayMarker);
         syncLiveTrailsVisibility();
-        map.setViewport(drone.routePoints, { margins: [110, 320, 160, 100] });
+        const maxReplayZoom = 15;
+        map.setViewport(state.replayPoints, { margins: [110, 320, 160, 100] });
+        if (typeof map.getZoom === "function" && typeof map.setZoom === "function" && map.getZoom() > maxReplayZoom) {
+            map.setZoom(maxReplayZoom);
+        }
         return updateReplayFrame(droneId, 0, false);
     }
 
     function updateReplayFrame(droneId, index, panToPoint) {
         const drone = getDroneById(droneId);
-        const frame = getDroneFrame(drone, index);
-        const currentPoint = drone.routePoints[index];
-        state.replayIndex = index;
-        state.replayTrail.setPath(drone.routePoints.slice(0, index + 1));
+        const replayFrames = getReplayFrames(drone);
+        const replayPoints = getReplayPoints(drone);
+        const safeIndex = Math.max(0, Math.min(index, replayFrames.length - 1));
+        const frame = replayFrames[safeIndex];
+        const currentPoint = replayPoints[safeIndex];
+        state.replayIndex = safeIndex;
+        state.replayTrail.setPath(replayPoints.slice(0, safeIndex + 1));
         state.replayMarker.setPosition(currentPoint);
         if (state.selectedType === "drone" && state.selectedId === droneId && state.trackMode === "history") {
-            setDroneDetail(drone, index, "history", false);
+            setDroneDetail(drone, safeIndex, "history", false);
             if (state.popupWindow) {
                 state.popupPoint = currentPoint;
                 positionMapPopup();
@@ -871,11 +1112,11 @@ export function createMapDemoApp(options = {}) {
         return {
             droneId: drone.id,
             droneName: drone.name,
-            startTime: drone.route[0].time,
+            startTime: replayFrames[0].time,
             currentTime: frame.time,
             speed: frame.speed,
             altitude: frame.altitude,
-            progress: Math.round((index / (drone.route.length - 1)) * 100)
+            progress: replayFrames.length > 1 ? Math.round((safeIndex / (replayFrames.length - 1)) * 100) : 100
         };
     }
 
@@ -905,6 +1146,7 @@ export function createMapDemoApp(options = {}) {
         getDroneFrame(droneId, index) {
             return getDroneFrame(getDroneById(droneId), index);
         },
+        getReplayFrameCount,
         prepareReplay,
         updateReplayFrame,
         clearReplayVisual,
