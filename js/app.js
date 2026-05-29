@@ -20,6 +20,8 @@ export function createMapDemoApp(options = {}) {
         replayPoints: [],
         replayDroneId: "",
         replayIndex: 0,
+        sceneReady: false,
+        sceneRevealTimer: null,
         popupPoint: null,
         popupWindow: null,
         layerVisibility: {
@@ -313,6 +315,56 @@ export function createMapDemoApp(options = {}) {
     function registerOverlay(group, overlay) {
         overlayGroups[group].push(overlay);
         map.addOverlay(overlay);
+    }
+
+    function setOverlayGroupVisibility(group, visible) {
+        const list = overlayGroups[group] || [];
+        for (let i = 0; i < list.length; i += 1) {
+            if (visible) {
+                list[i].show();
+            } else {
+                list[i].hide();
+            }
+        }
+    }
+
+    function hideAllSceneOverlays() {
+        const groups = Object.keys(overlayGroups);
+        for (let i = 0; i < groups.length; i += 1) {
+            setOverlayGroupVisibility(groups[i], false);
+        }
+    }
+
+    function revealSceneOverlays() {
+        if (state.sceneReady) {
+            return;
+        }
+        state.sceneReady = true;
+        if (state.sceneRevealTimer) {
+            clearTimeout(state.sceneRevealTimer);
+            state.sceneRevealTimer = null;
+        }
+        applyInitialLayerVisibility();
+        syncDroneMarkerVisibility();
+        syncLiveTrailsVisibility();
+        startLive();
+    }
+
+    function waitForMapSceneReady() {
+        let revealed = false;
+        function reveal() {
+            if (revealed) {
+                return;
+            }
+            revealed = true;
+            revealSceneOverlays();
+        }
+        if (map && typeof map.addEventListener === "function") {
+            map.addEventListener("tilesloaded", function () {
+                setTimeout(reveal, 120);
+            });
+        }
+        state.sceneRevealTimer = setTimeout(reveal, 900);
     }
 
     function initMap() {
@@ -1129,11 +1181,11 @@ export function createMapDemoApp(options = {}) {
         renderStats();
         bindLayerToggles();
         bindToolbar();
-        syncDroneMarkerVisibility();
         applyInitialLayerVisibility();
+        hideAllSceneOverlays();
         setEmptyDetail();
         updateMapTip();
-        startLive();
+        waitForMapSceneReady();
     }
 
     return {
